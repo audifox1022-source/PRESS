@@ -190,6 +190,7 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight,
             if gas_used <= 0: continue
             
             unit = gas_used / (charge_kg / 1000) # Nm3 / ton
+            # 목표 원단위보다 작거나 같을 때 'Pass'
             is_pass = unit <= target_cost
             
             results.append({
