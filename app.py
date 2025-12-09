@@ -26,7 +26,7 @@ if os.path.exists(FONT_FILE):
     plt.rcParams['axes.unicode_minus'] = False
     HAS_KOREAN_FONT = True
 else:
-    st.warning(f"⚠️ '{FONT_FILE}' 파일을 찾을 수 없습니다. 차트와 PDF의 한글이 깨질 수 있습니다.")
+    # 폰트 파일이 없을 경우 경고 메시지는 사이드바에 작게 표시하거나 생략 가능
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['axes.unicode_minus'] = False
     HAS_KOREAN_FONT = False
@@ -45,28 +45,32 @@ def load_and_process_data(sensor_files, prod_file):
     except Exception as e:
         return None, f"생산 실적 파일 오류: {e}"
 
-    # B. 센서 데이터 로딩 (CSV 다중 파일 병합)
+    # B. 센서 데이터 로딩 (CSV 및 Excel 지원)
     df_list = []
     for f in sensor_files:
         try:
-            # 한글 CSV 인코딩 대응 (cp949 우선 시도)
-            temp = pd.read_csv(f, encoding='cp949')
+            # 파일 확장자 확인
+            if f.name.endswith('.xlsx') or f.name.endswith('.xls'):
+                # 엑셀 파일 로딩
+                temp = pd.read_excel(f)
+            else:
+                # CSV 파일 로딩 (인코딩 대응)
+                try:
+                    temp = pd.read_csv(f, encoding='cp949')
+                except:
+                    temp = pd.read_csv(f, encoding='utf-8')
+            
             df_list.append(temp)
-        except:
-            try:
-                temp = pd.read_csv(f, encoding='utf-8')
-                df_list.append(temp)
-            except Exception as e:
-                return None, f"CSV 파일 로딩 오류 ({f.name}): {e}"
+            
+        except Exception as e:
+            return None, f"파일 로딩 오류 ({f.name}): {e}"
     
     if not df_list:
-        return None, "CSV 파일이 비어있습니다."
+        return None, "업로드된 데이터가 없습니다."
         
     df_sensor = pd.concat(df_list, ignore_index=True)
     
     # 컬럼명 표준화 (사용자 데이터: 일시, 온도, 가스지침 순서 가정)
-    # 실제 데이터 컬럼명이 다를 경우 여기서 수정 필요
-    # 예: df_sensor.columns = ['Time', 'Temp', 'Gas']
     try:
         # 안전하게 인덱스로 접근하여 컬럼명 변경
         cols = df_sensor.columns
@@ -95,7 +99,6 @@ def load_and_process_data(sensor_files, prod_file):
         if charge_ton <= 0: continue
 
         # 가스 사용량 계산 (Max - Min)
-        # 데이터 튀는 현상 방지를 위해 퀀타일 사용 가능하나 여기선 Min/Max 사용
         gas_start = group['가스지침'].min()
         gas_end = group['가스지침'].max()
         gas_used = gas_end - gas_start
@@ -192,14 +195,15 @@ def main():
     with st.sidebar:
         st.header("1. 데이터 업로드")
         prod_file = st.file_uploader("생산 실적 (Excel)", type=['xlsx'])
-        sensor_files = st.file_uploader("가열로 데이터 (CSV)", type=['csv'], accept_multiple_files=True)
+        # [수정] type에 xlsx, xls 추가
+        sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
         
         process_btn = st.button("데이터 분석 실행")
         st.info("⚠️ GitHub 배포 시 데이터 파일은 업로드하지 마세요. (보안)")
 
     # 메인 화면
     if prod_file and sensor_files and process_btn:
-        with st.spinner("데이터 분석 중..."):
+        with st.spinner("데이터 분석 중... (대용량 엑셀은 시간이 조금 걸릴 수 있습니다)"):
             df_result, df_raw = load_and_process_data(sensor_files, prod_file)
             
             if df_result is not None:
