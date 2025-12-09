@@ -10,6 +10,7 @@ import os
 # 1. 앱 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="가열로 5호기 성과 검증", layout="wide")
+TARGET_UNIT_COST = 25.53 # 목표 원단위
 
 # 폰트 설정
 FONT_FILE = 'NanumGothic.ttf'
@@ -26,24 +27,21 @@ else:
     plt.rcParams['axes.unicode_minus'] = False
 
 # ---------------------------------------------------------
-# 2. 데이터 처리 함수
+# 2. 데이터 처리 함수 (600도 이하 시작 로직 적용)
 # ---------------------------------------------------------
 def process_data(sensor_files, df_prod, col_p_date, col_p_weight, 
-                s_header_row, col_s_time, col_s_temp, col_s_gas,
-                target_cost): # 목표값 인자 추가
+                s_header_row, col_s_time, col_s_temp, col_s_gas):
     
     # === A. 생산 실적 처리 ===
     try:
         df_prod = df_prod.rename(columns={col_p_date: '일자', col_p_weight: '장입량'})
         df_prod['일자'] = pd.to_datetime(df_prod['일자'], errors='coerce')
-        
         if df_prod['장입량'].dtype == object:
             df_prod['장입량'] = df_prod['장입량'].astype(str).str.replace(',', '')
         df_prod['장입량'] = pd.to_numeric(df_prod['장입량'], errors='coerce')
-        
         df_prod = df_prod.dropna(subset=['일자', '장입량'])
     except Exception as e:
-        return None, f"생산 실적 처리 중 오류: {e}"
+        return None, f"생산 실적 오류: {e}"
 
     # === B. 가열로 데이터 로딩 ===
     df_list = []
@@ -53,30 +51,26 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight,
             if f.name.endswith('.xlsx') or f.name.endswith('.xls'):
                 temp = pd.read_excel(f, header=s_header_row)
             else:
-                try:
-                    temp = pd.read_csv(f, encoding='cp949', header=s_header_row)
-                except:
-                    temp = pd.read_csv(f, encoding='utf-8', header=s_header_row)
+                try: temp = pd.read_csv(f, encoding='cp949', header=s_header_row)
+                except: temp = pd.read_csv(f, encoding='utf-8', header=s_header_row)
             df_list.append(temp)
         except Exception as e:
-            return None, f"파일 로딩 오류 ({f.name}): {e}"
+            return None, f"파일 오류 ({f.name}): {e}"
     
-    if not df_list: return None, "가열로 데이터 없음"
-    
+    if not df_list: return None, "데이터 없음"
     df_sensor = pd.concat(df_list, ignore_index=True)
     df_sensor.columns = [str(c).strip() for c in df_sensor.columns]
 
-    # 가열로 컬럼 매핑
+    # 컬럼 매핑
     try:
         df_sensor = df_sensor.rename(columns={col_s_time: '일시', col_s_temp: '온도', col_s_gas: '가스지침'})
         df_sensor['일시'] = pd.to_datetime(df_sensor['일시'], errors='coerce')
         df_sensor['온도'] = pd.to_numeric(df_sensor['온도'], errors='coerce')
         df_sensor['가스지침'] = pd.to_numeric(df_sensor['가스지침'], errors='coerce')
-        
-        df_sensor = df_sensor.dropna(subset=['일시'])
+        df_sensor = df_sensor.dropna(subset=['일시', '가스지침'])
         df_sensor = df_sensor.sort_values('일시')
     except Exception as e:
-        return None, f"가열로 데이터 컬럼 매핑 오류: {e}"
+        return None, f"가열로 컬럼 매핑 오류: {e}"
 
     # === C. 날짜 매칭 ===
     prod_dates = set(df_prod['일자'].dt.date)
@@ -84,9 +78,9 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight,
     common_dates = sorted(list(prod_dates.intersection(sensor_dates)))
     
     if not common_dates:
-        return None, f"매칭 실패 (생산 {len(prod_dates)}일 vs 센서 {len(sensor_dates)}일). 날짜 형식을 확인하세요."
+        return None, "날짜 매칭 실패"
 
-    # === D. 분석 Loop ===
+    # === D. 분석 (600도 이하 시작 조건 적용) ===
     results = []
     for date in common_dates:
         prod_row = df_prod[df_prod['일자'] == pd.to_datetime(date)]
@@ -97,27 +91,49 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight,
         charge = prod_row.iloc[0]['장입량']
         if charge <= 0: continue
         
-        gas_used = daily['가스지침'].max() - daily['가스지침'].min()
+        # [핵심 로직] 600도 이하인 지점 찾기
+        # 하루 데이터 중 600도 이하인 첫 번째 지점을 '시작점'으로 간주
+        valid_starts = daily[daily['온도'] <= 600]
+        
+        if valid_starts.empty:
+            # 600도 이하로 떨어진 적이 없는 날은 제외 (Start 조건 불만족)
+            continue
+            
+        # 유효한 시작점 (600도 이하 첫 지점)
+        start_row = valid_starts.iloc[0]
+        # 종료점 (하루의 마지막 데이터 또는 사이클 종료 정의에 따름 - 여기선 해당일 마지막)
+        end_row = daily.iloc[-1]
+        
+        # 시작 시간이 종료 시간보다 늦으면 스킵 (데이터 꼬임 방지)
+        if start_row['일시'] >= end_row['일시']: continue
+
+        # 가스 사용량 계산 (종료 지침 - 시작 지침)
+        gas_start_val = start_row['가스지침']
+        gas_end_val = end_row['가스지침']
+        gas_used = gas_end_val - gas_start_val
+        
         if gas_used <= 0: continue
         
         unit = gas_used / (charge / 1000)
-        is_pass = unit <= target_cost # 사용자 설정 목표값 사용
+        is_pass = unit <= TARGET_UNIT_COST
         
         results.append({
             '날짜': date.strftime('%Y-%m-%d'),
-            '검침시작': daily.iloc[0]['일시'].strftime('%Y-%m-%d %H:%M'),
-            '검침완료': daily.iloc[-1]['일시'].strftime('%Y-%m-%d %H:%M'),
-            'Cycle종료': daily.iloc[-1]['일시'].strftime('%Y-%m-%d %H:%M'),
+            '검침시작': start_row['일시'].strftime('%Y-%m-%d %H:%M'),
+            '시작지침': gas_start_val, # 리포트 출력용
+            '검침완료': end_row['일시'].strftime('%Y-%m-%d %H:%M'),
+            '종료지침': gas_end_val,   # 리포트 출력용
             '가스사용량(Nm3)': int(gas_used),
             '장입량(kg)': int(charge),
             '원단위': round(unit, 2),
-            '달성여부': 'Pass' if is_pass else 'Fail'
+            '달성여부': 'Pass' if is_pass else 'Fail',
+            '시작온도': start_row['온도'] # 차트 확인용
         })
         
     return pd.DataFrame(results), df_sensor
 
 # ---------------------------------------------------------
-# 3. PDF 생성
+# 4. PDF 생성 (지침값 포함)
 # ---------------------------------------------------------
 class PDFReport(FPDF):
     def header(self):
@@ -136,6 +152,7 @@ def generate_pdf(row_data, chart_path, target_cost):
     pdf.cell(0, 10, f"3.5 가열로 5호기 - {row_data['날짜']} (23% 절감 검증)", 0, 1, 'L')
     pdf.ln(5)
 
+    # 테이블 헤더
     pdf.set_fill_color(240, 240, 240)
     pdf.set_font(font, '', 10)
     headers = ["검침 시작", "검침 완료", "③ 가스 사용량\n(②-①=③)", "Cycle 종료", "장입량"]
@@ -147,16 +164,38 @@ def generate_pdf(row_data, chart_path, target_cost):
         pdf.set_xy(x + sum(widths[:i]), y)
         pdf.multi_cell(widths[i], 6, h, border=1, align='C', fill=True)
     
+    # 데이터 출력 (지침값 포함)
     pdf.set_xy(x, y + 12)
-    vals = [str(row_data['검침시작']), str(row_data['검침완료']), f"{row_data['가스사용량(Nm3)']:,} Nm3", str(row_data['Cycle종료']), f"{row_data['장입량(kg)']:,} kg"]
-    for i, v in enumerate(vals):
-        pdf.cell(widths[i], 10, v, border=1, align='C')
     
-    pdf.ln(15)
+    # 지침값을 포함한 텍스트 구성
+    start_txt = f"{row_data['검침시작']}\n({row_data['시작지침']:,.0f})"
+    end_txt = f"{row_data['검침완료']}\n({row_data['종료지침']:,.0f})"
+    
+    vals = [
+        start_txt,
+        end_txt,
+        f"{row_data['가스사용량(Nm3)']:,} Nm3",
+        str(row_data['검침완료']), # Cycle 종료는 검침 완료와 동일하게 설정
+        f"{row_data['장입량(kg)']:,} kg"
+    ]
+    
+    # Multi-cell로 높이 조절하여 출력 (2줄 텍스트 대응)
+    max_cell_h = 12
+    for i, v in enumerate(vals):
+        current_x = x + sum(widths[:i])
+        pdf.set_xy(current_x, y + 12)
+        # 텍스트가 길면 줄바꿈 되도록 MultiCell 사용
+        pdf.multi_cell(widths[i], 6, v, border=1, align='C')
+        
+    pdf.ln(5) # 줄바꿈 보정
+    
+    # 차트 삽입
+    pdf.set_y(y + 12 + 15) # 테이블 아래로 이동
     pdf.set_font(font, '', 12)
-    pdf.cell(0, 10, "▶ 열처리 Chart (온도/가스 트렌드)", 0, 1, 'L')
+    pdf.cell(0, 10, "▶ 열처리 Chart (온도/가스 트렌드 - 시작온도 600℃ 이하)", 0, 1, 'L')
     pdf.image(chart_path, x=10, w=190)
     
+    # 결과 요약
     pdf.ln(5)
     pdf.set_font(font, '', 10)
     pdf.cell(0, 8, f"* 실적 원단위: {row_data['원단위']} Nm3/ton (목표 {target_cost} 이하 달성)", 0, 1, 'R')
@@ -164,10 +203,11 @@ def generate_pdf(row_data, chart_path, target_cost):
     return pdf
 
 # ---------------------------------------------------------
-# 4. 메인 UI
+# 5. 메인 UI
 # ---------------------------------------------------------
 def main():
     st.title("🏭 가열로 5호기 성과 검증 시스템")
+    st.caption("✅ 시작 온도 600℃ 이하 데이터 자동 필터링 적용됨")
     
     with st.sidebar:
         st.header("1. 데이터 업로드")
@@ -175,20 +215,13 @@ def main():
         sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
         
         st.divider()
-        st.header("2. 목표 설정")
-        # 목표값 기본설정 48.25로 변경 (파일 분석 결과 반영)
-        target_cost = st.number_input("목표 원단위 (Nm3/ton)", value=48.25, step=0.1, format="%.2f")
-        st.caption(f"기본값 48.25는 개선전(62.66) 대비 23% 절감 수치입니다.")
-
-        st.divider()
-        st.header("3. 엑셀 설정")
+        st.header("2. 데이터 설정")
         p_header = st.number_input("생산실적 제목 행", 0, 10, 0, key='p_h')
-        
-        st.header("4. 가열로 데이터 설정")
         s_header = st.number_input("가열로 데이터 제목 행", 0, 20, 0, key='s_h')
         
         run_btn = st.button("🚀 분석 실행", type="primary")
 
+    # 컬럼 지정 UI
     if prod_file and sensor_files:
         st.subheader("🛠️ 데이터 컬럼 지정")
         c1, c2 = st.columns(2)
@@ -198,8 +231,8 @@ def main():
             try:
                 df_p = pd.read_excel(prod_file, header=p_header)
                 st.dataframe(df_p.head(2))
-                col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=0)
-                col_p_weight = st.selectbox("⚖️ 장입량 컬럼", df_p.columns, index=1 if len(df_p.columns)>1 else 0)
+                col_p_date = st.selectbox("📅 날짜", df_p.columns, index=0)
+                col_p_weight = st.selectbox("⚖️ 장입량", df_p.columns, index=1 if len(df_p.columns)>1 else 0)
             except: st.error("파일 읽기 실패")
 
         with c2:
@@ -212,32 +245,32 @@ def main():
                 else: df_s = pd.read_excel(f, header=s_header, nrows=5)
                 
                 st.dataframe(df_s.head(2))
-                col_s_time = st.selectbox("⏰ 시간(일시) 컬럼", df_s.columns, index=0)
-                col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=1 if len(df_s.columns)>1 else 0)
-                col_s_gas = st.selectbox("⛽ 가스(지침/유량) 컬럼", df_s.columns, index=2 if len(df_s.columns)>2 else 0)
+                col_s_time = st.selectbox("⏰ 일시", df_s.columns, index=0)
+                col_s_temp = st.selectbox("🔥 온도", df_s.columns, index=1 if len(df_s.columns)>1 else 0)
+                col_s_gas = st.selectbox("⛽ 가스지침", df_s.columns, index=2 if len(df_s.columns)>2 else 0)
             except: st.error("파일 읽기 실패")
 
         if run_btn:
-            with st.spinner("데이터 분석 중..."):
-                # 다시 읽기 (전체 데이터)
+            with st.spinner("600℃ 이하 시작 데이터 검색 중..."):
+                # 다시 읽기
                 f_prod = pd.read_excel(prod_file, header=p_header)
                 
                 res, raw = process_data(sensor_files, f_prod, 
                                       col_p_date, col_p_weight, 
-                                      s_header, col_s_time, col_s_temp, col_s_gas,
-                                      target_cost) # 목표값 전달
+                                      s_header, col_s_time, col_s_temp, col_s_gas)
                 
                 if res is not None:
                     st.session_state['res'] = res
                     st.session_state['raw'] = raw
-                    st.success(f"분석 완료! 총 {len(res)}일 데이터 확인됨.")
+                    st.success(f"분석 완료! 유효 데이터 {len(res)}건 발견.")
                 else:
-                    st.error(f"분석 실패: {raw}")
+                    st.error("분석 실패. 날짜나 데이터 형식을 확인하세요.")
 
+    # 결과 화면
     if 'res' in st.session_state:
         df = st.session_state['res']
         st.divider()
-        t1, t2 = st.tabs(["📊 전체 분석 결과", "📑 성공 리포트 생성"])
+        t1, t2 = st.tabs(["📊 분석 결과", "📑 리포트 출력"])
         
         with t1:
             st.dataframe(df.style.applymap(lambda x: 'background-color:#d4edda' if x=='Pass' else 'background-color:#f8d7da', subset=['달성여부']), use_container_width=True)
@@ -245,28 +278,45 @@ def main():
         with t2:
             df_pass = df[df['달성여부'] == 'Pass']
             if df_pass.empty:
-                st.warning(f"목표({target_cost} Nm3/ton)를 달성한 데이터가 없습니다.")
+                st.warning(f"목표({TARGET_UNIT_COST})를 달성한 데이터가 없습니다.")
             else:
-                s_date = st.selectbox("성공(Pass) 데이터 선택:", df_pass['날짜'].unique())
+                s_date = st.selectbox("성공 데이터 선택:", df_pass['날짜'].unique())
                 if st.button("📄 PDF 생성"):
                     row = df_pass[df_pass['날짜'] == s_date].iloc[0]
-                    daily = st.session_state['raw']
-                    daily = daily[daily['일시'].dt.strftime('%Y-%m-%d') == s_date]
                     
+                    # 차트용 데이터 필터링 (시작 시간 ~ 종료 시간)
+                    daily = st.session_state['raw']
+                    start_ts = pd.to_datetime(row['검침시작'])
+                    end_ts = pd.to_datetime(row['검침완료'])
+                    
+                    # 차트는 시작 시간 조금 전부터 보여주면 좋음 (시각적 효과)
+                    mask = (daily['일시'] >= start_ts) & (daily['일시'] <= end_ts)
+                    chart_data = daily.loc[mask]
+                    
+                    if chart_data.empty:
+                        # 매칭 실패 시 해당 일자 전체 사용
+                        chart_data = daily[daily['일시'].dt.strftime('%Y-%m-%d') == s_date]
+
                     fig, ax1 = plt.subplots(figsize=(12, 5))
-                    ax1.fill_between(daily['일시'], daily['온도'], color='red', alpha=0.3)
-                    ax1.plot(daily['일시'], daily['온도'], 'r-', label='Temp')
+                    ax1.fill_between(chart_data['일시'], chart_data['온도'], color='red', alpha=0.3)
+                    ax1.plot(chart_data['일시'], chart_data['온도'], 'r-', label='Temp')
                     ax1.set_ylabel('Temp', color='r')
+                    ax1.set_ylim(bottom=0) # 온도는 0부터 시작
+                    
                     ax2 = ax1.twinx()
-                    ax2.plot(daily['일시'], daily['가스지침'], 'b-', label='Gas')
-                    ax2.set_ylabel('Gas', color='b')
-                    plt.title(f"Cycle Trend ({s_date})")
+                    ax2.plot(chart_data['일시'], chart_data['가스지침'], 'b-', label='Gas')
+                    ax2.set_ylabel('Gas Cumulative', color='b')
+                    
+                    # 시작점 표시
+                    ax1.axvline(x=start_ts, color='green', linestyle='--', label='Start (<600C)')
+                    
+                    plt.title(f"Cycle Trend ({s_date}) - Start Temp: {row['시작온도']}C")
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                         fig.savefig(tmp.name, bbox_inches='tight')
                         img_path = tmp.name
                     
-                    pdf = generate_pdf(row, img_path, target_cost)
+                    pdf = generate_pdf(row, img_path, TARGET_UNIT_COST)
                     pdf_bytes = pdf.output(dest='S').encode('latin-1')
                     st.download_button("📥 리포트 다운로드", pdf_bytes, f"Furnace5_{s_date}.pdf", "application/pdf")
                     os.remove(img_path)
