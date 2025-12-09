@@ -27,117 +27,72 @@ else:
     plt.rcParams['axes.unicode_minus'] = False
 
 # ---------------------------------------------------------
-# 2. [핵심] 헤더 자동 감지 함수 (알아서 줄 찾기)
+# 2. 데이터 처리 함수 (컬럼 지정형)
 # ---------------------------------------------------------
-def find_header_row(file, file_type, keywords):
-    """
-    파일의 앞부분(20줄)을 읽어서 keywords(예: '일자', '장입량')가 
-    포함된 행 번호를 자동으로 찾아냅니다.
-    """
+def process_data(sensor_files, df_prod, col_date, col_weight, sensor_header_row):
+    # --- A. 생산 실적 처리 ---
     try:
-        file.seek(0)
-        # 앞 20줄만 읽어봄
-        if file_type == 'excel':
-            df_preview = pd.read_excel(file, header=None, nrows=20)
-        else:
-            try:
-                df_preview = pd.read_csv(file, header=None, nrows=20, encoding='cp949')
-            except:
-                file.seek(0)
-                df_preview = pd.read_csv(file, header=None, nrows=20, encoding='utf-8')
+        # 사용자가 선택한 컬럼으로 이름 변경
+        df_prod = df_prod.rename(columns={col_date: '일자', col_weight: '장입량'})
         
-        # 행별로 검사
-        for idx, row in df_preview.iterrows():
-            row_str = row.astype(str).values.tolist()
-            # 행에 키워드가 하나라도 포함되어 있으면 그 줄이 헤더!
-            # (공백 제거 후 비교)
-            row_text = "".join([str(x).strip() for x in row_str])
-            for kw in keywords:
-                if kw in row_text:
-                    file.seek(0) # 파일 포인터 초기화 (중요)
-                    return idx # 찾은 행 번호 반환
-                    
-        file.seek(0)
-        return 0 # 못 찾으면 0번 줄로 가정
-    except:
-        file.seek(0)
-        return 0
-
-# ---------------------------------------------------------
-# 3. 데이터 로딩 및 처리
-# ---------------------------------------------------------
-@st.cache_data
-def load_and_process_data(sensor_files, prod_file):
-    # --- A. 생산 실적 로딩 (자동 감지) ---
-    try:
-        # 1. '일자' 또는 '장입량' 단어가 있는 줄을 찾음
-        header_idx = find_header_row(prod_file, 'excel', ['일자', '장입량', 'Date', 'Charge'])
+        # 전처리
+        df_prod['일자'] = pd.to_datetime(df_prod['일자'], errors='coerce')
+        if df_prod['장입량'].dtype == object:
+            df_prod['장입량'] = df_prod['장입량'].astype(str).str.replace(',', '')
+        df_prod['장입량'] = pd.to_numeric(df_prod['장입량'], errors='coerce')
         
-        df_prod = pd.read_excel(prod_file, header=header_idx)
-        df_prod.columns = [str(c).strip() for c in df_prod.columns]
-        
-        # 컬럼 매핑 (첫번째=일자, 두번째=장입량)
-        if len(df_prod.columns) >= 2:
-            df_prod.rename(columns={df_prod.columns[0]: '일자', df_prod.columns[1]: '장입량'}, inplace=True)
-            
-            # 전처리
-            df_prod['일자'] = pd.to_datetime(df_prod['일자'], errors='coerce')
-            if df_prod['장입량'].dtype == object:
-                df_prod['장입량'] = df_prod['장입량'].astype(str).str.replace(',', '')
-            df_prod['장입량'] = pd.to_numeric(df_prod['장입량'], errors='coerce')
-            df_prod = df_prod.dropna(subset=['일자', '장입량'])
-        else:
-            return None, "생산실적 파일 양식을 확인해주세요."
-            
+        df_prod = df_prod.dropna(subset=['일자', '장입량'])
     except Exception as e:
-        return None, f"생산 실적 오류: {e}"
+        return None, f"생산 실적 처리 오류: {e}"
 
-    # --- B. 가열로 데이터 로딩 (자동 감지) ---
+    # --- B. 가열로 데이터 로딩 ---
     df_list = []
     for f in sensor_files:
         try:
-            # '일시', '온도', '가스' 단어가 있는 줄을 찾음
-            header_idx = 0
-            is_excel = f.name.endswith('.xlsx') or f.name.endswith('.xls')
-            file_type = 'excel' if is_excel else 'csv'
-            
-            header_idx = find_header_row(f, file_type, ['일시', '온도', '가스', 'Time', 'Temp'])
-            
-            if is_excel:
-                temp = pd.read_excel(f, header=header_idx)
+            if f.name.endswith('.xlsx') or f.name.endswith('.xls'):
+                temp = pd.read_excel(f, header=sensor_header_row)
             else:
                 try:
-                    temp = pd.read_csv(f, encoding='cp949', header=header_idx)
+                    f.seek(0)
+                    temp = pd.read_csv(f, encoding='cp949', header=sensor_header_row)
                 except:
-                    temp = pd.read_csv(f, encoding='utf-8', header=header_idx)
+                    f.seek(0)
+                    temp = pd.read_csv(f, encoding='utf-8', header=sensor_header_row)
             df_list.append(temp)
         except Exception as e:
             return None, f"파일 로딩 오류 ({f.name}): {e}"
     
-    if not df_list: return None, "데이터 없음"
+    if not df_list: return None, "가열로 데이터 없음"
     
     df_sensor = pd.concat(df_list, ignore_index=True)
     df_sensor.columns = [str(c).strip() for c in df_sensor.columns]
 
-    # 컬럼 매핑
+    # 가열로 데이터는 순서대로 (0:일시, 1:온도, 2:가스) 가정
     try:
-        df_sensor.rename(columns={df_sensor.columns[0]: '일시', df_sensor.columns[1]: '온도', df_sensor.columns[2]: '가스지침'}, inplace=True)
+        if len(df_sensor.columns) < 3:
+            return None, "가열로 데이터 컬럼 부족 (최소 3개 필요)"
+            
+        cols = df_sensor.columns
+        df_sensor.rename(columns={cols[0]: '일시', cols[1]: '온도', cols[2]: '가스지침'}, inplace=True)
+        
         df_sensor['일시'] = pd.to_datetime(df_sensor['일시'], errors='coerce')
         df_sensor['온도'] = pd.to_numeric(df_sensor['온도'], errors='coerce')
         df_sensor['가스지침'] = pd.to_numeric(df_sensor['가스지침'], errors='coerce')
+        
         df_sensor = df_sensor.dropna(subset=['일시'])
         df_sensor = df_sensor.sort_values('일시')
-    except:
-        return None, "가열로 데이터 포맷 오류"
+    except Exception as e:
+        return None, f"가열로 데이터 포맷 오류: {e}"
 
-    # --- C. 날짜 매칭 및 분석 ---
+    # --- C. 날짜 매칭 ---
     prod_dates = set(df_prod['일자'].dt.date)
     sensor_dates = set(df_sensor['일시'].dt.date)
     common_dates = sorted(list(prod_dates.intersection(sensor_dates)))
     
     if not common_dates:
-        return None, f"날짜 매칭 실패 (생산 {len(prod_dates)}일, 센서 {len(sensor_dates)}일 감지됨)"
+        return None, f"매칭 실패 (생산 {len(prod_dates)}일 vs 센서 {len(sensor_dates)}일). 날짜 형식을 확인하세요."
 
+    # --- D. 분석 ---
     results = []
     for date in common_dates:
         prod_row = df_prod[df_prod['일자'] == pd.to_datetime(date)]
@@ -145,13 +100,13 @@ def load_and_process_data(sensor_files, prod_file):
         
         if prod_row.empty or daily.empty: continue
         
-        charge_kg = prod_row.iloc[0]['장입량']
-        if charge_kg <= 0: continue
+        charge = prod_row.iloc[0]['장입량']
+        if charge <= 0: continue
         
         gas_used = daily['가스지침'].max() - daily['가스지침'].min()
         if gas_used <= 0: continue
         
-        unit = gas_used / (charge_kg / 1000)
+        unit = gas_used / (charge / 1000)
         is_pass = unit <= TARGET_UNIT_COST
         
         results.append({
@@ -160,7 +115,7 @@ def load_and_process_data(sensor_files, prod_file):
             '검침완료': daily.iloc[-1]['일시'].strftime('%Y-%m-%d %H:%M'),
             'Cycle종료': daily.iloc[-1]['일시'].strftime('%Y-%m-%d %H:%M'),
             '가스사용량(Nm3)': int(gas_used),
-            '장입량(kg)': int(charge_kg),
+            '장입량(kg)': int(charge),
             '원단위': round(unit, 2),
             '달성여부': 'Pass' if is_pass else 'Fail'
         })
@@ -213,32 +168,64 @@ def generate_pdf(row_data, chart_path):
     return pdf
 
 # ---------------------------------------------------------
-# 5. 메인 UI
+# 5. 메인 UI (컬럼 지정 기능 추가)
 # ---------------------------------------------------------
 def main():
-    st.title("🏭 가열로 5호기 성과 검증 시스템 (AI 자동감지)")
+    st.title("🏭 가열로 5호기 성과 검증 (컬럼 지정형)")
     
     with st.sidebar:
-        st.header("데이터 업로드")
+        st.header("1. 데이터 업로드")
         prod_file = st.file_uploader("생산 실적 (Excel)", type=['xlsx'])
         sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
-        st.info("💡 파일 제목줄을 자동으로 찾습니다.")
-        run_btn = st.button("🚀 분석 실행", type="primary")
-
-    if run_btn and prod_file and sensor_files:
-        with st.spinner("데이터 분석 및 헤더 자동 탐색 중..."):
-            res, raw = load_and_process_data(sensor_files, prod_file)
+        
+        st.markdown("---")
+        st.header("2. 엑셀 설정 (필수)")
+        header_idx = st.number_input("제목 행 번호", 0, 20, 0)
+    
+    # 데이터 로딩 및 컬럼 선택 UI
+    if prod_file and sensor_files:
+        try:
+            # 생산 실적 미리 읽기
+            df_prod_raw = pd.read_excel(prod_file, header=header_idx)
+            df_prod_raw.columns = [str(c).strip() for c in df_prod_raw.columns]
             
-            if res is not None:
-                st.session_state['res'] = res
-                st.session_state['raw'] = raw
-                st.success(f"분석 완료! 총 {len(res)}일 데이터가 매칭되었습니다.")
-            else:
-                st.error(f"분석 실패: {raw}")
+            st.info("👇 **아래에서 '날짜'와 '장입량'에 해당하는 열을 선택해주세요.**")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("##### 1️⃣ 생산 실적 컬럼 지정")
+                st.dataframe(df_prod_raw.head(3))
+                
+                # 컬럼 선택 박스
+                col_date = st.selectbox("📅 '날짜' 열 선택", df_prod_raw.columns)
+                col_weight = st.selectbox("⚖️ '장입량' 열 선택", df_prod_raw.columns, index=1 if len(df_prod_raw.columns)>1 else 0)
+            
+            with c2:
+                st.markdown("##### 2️⃣ 분석 준비")
+                st.write(f"선택된 날짜 열: **{col_date}**")
+                st.write(f"선택된 장입량 열: **{col_weight}**")
+                st.write("설정이 맞다면 아래 버튼을 누르세요.")
+                
+                run_btn = st.button("🚀 분석 실행", type="primary")
+            
+            # 분석 실행
+            if run_btn:
+                with st.spinner("분석 중..."):
+                    res, raw = process_data(sensor_files, df_prod_raw, col_date, col_weight, header_idx)
+                    
+                    if res is not None:
+                        st.session_state['res'] = res
+                        st.session_state['raw'] = raw
+                        st.success(f"분석 성공! {len(res)}일 매칭됨.")
+                    else:
+                        st.error(f"분석 실패: {raw}")
 
+        except Exception as e:
+            st.error(f"파일 읽기 오류 (제목 행 번호를 조절해보세요): {e}")
+
+    # 결과 화면
     if 'res' in st.session_state:
         df = st.session_state['res']
-        
         st.divider()
         t1, t2 = st.tabs(["📊 분석 결과", "📑 리포트 출력"])
         
@@ -248,7 +235,7 @@ def main():
         with t2:
             df_pass = df[df['달성여부'] == 'Pass']
             if df_pass.empty:
-                st.warning("목표(23%) 달성 데이터가 없습니다.")
+                st.warning("목표(23%) 달성 데이터 없음.")
             else:
                 s_date = st.selectbox("날짜 선택:", df_pass['날짜'].unique())
                 if st.button("PDF 생성"):
@@ -260,11 +247,9 @@ def main():
                     ax1.fill_between(daily['일시'], daily['온도'], color='red', alpha=0.3)
                     ax1.plot(daily['일시'], daily['온도'], 'r-', label='Temp')
                     ax1.set_ylabel('Temp', color='r')
-                    
                     ax2 = ax1.twinx()
                     ax2.plot(daily['일시'], daily['가스지침'], 'b-', label='Gas')
                     ax2.set_ylabel('Gas', color='b')
-                    
                     plt.title(f"Trend ({s_date})")
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
