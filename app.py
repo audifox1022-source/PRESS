@@ -111,6 +111,21 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
         return None, f"종료 온도({temp_end}도 이하) 도달 안 함"
         
     end_row = end_candidates.iloc[0]
+    end_time = end_row['일시']
+
+    # 4. 사이클 중간에 비정상적인 저온 발생 여부 확인 (추가된 로직)
+    # 시작 시간부터 종료 시간까지의 데이터 추출
+    cycle_window = daily_data[(daily_data['일시'] > start_time) & (daily_data['일시'] < end_time)].copy()
+
+    # 이 구간 내에서 시작 온도(temp_start)보다 낮은 온도가 있는지 확인
+    # 단, 온도가 start_row의 온도와 같거나 그보다 낮은 값(시작점에 해당하는 값)은 제외하기 위해 start_row의 온도를 기준으로 합니다.
+    # 안전하게 temp_start보다 엄격하게 낮은지 확인합니다.
+    abnormal_low_temp = cycle_window[cycle_window['온도'] < temp_start]
+    
+    if not abnormal_low_temp.empty:
+        abnormal_time = abnormal_low_temp.iloc[0]['일시'].strftime('%Y-%m-%d %H:%M')
+        return None, f"사이클 중 비정상적인 저온 발생 (<{temp_start}℃) at {abnormal_time}"
+    # (추가 로직 종료)
     
     return {
         'start_row': start_row,
