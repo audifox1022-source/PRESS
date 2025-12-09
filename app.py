@@ -304,6 +304,19 @@ def plot_cycle_chart(row, full_raw, temp_holding_min, temp_holding_max, fig_widt
     return fig
 
 # ---------------------------------------------------------
+# 4.6 컬럼 선택을 위한 헬퍼 함수
+# ---------------------------------------------------------
+def get_default_index(columns, keywords):
+    """컬럼 이름에 키워드가 포함되어 있는지 확인하여 가장 적절한 기본 인덱스를 반환합니다."""
+    for keyword in keywords:
+        for i, col in enumerate(columns):
+            # 컬럼 이름을 소문자로 변환하여 키워드 포함 여부 확인
+            if keyword in str(col).lower():
+                return i
+    # 키워드 일치 항목이 없으면 첫 번째 컬럼을 기본값으로 반환
+    return 0 
+
+# ---------------------------------------------------------
 # 5. 메인 UI
 # ---------------------------------------------------------
 def main():
@@ -333,6 +346,7 @@ def main():
         
         st.divider()
         st.header("3. 엑셀/CSV 설정")
+        # 사용자가 원하는 행을 직접 선택하는 기능 (제목행 인덱스 선택)
         p_header = st.number_input("생산실적 제목행 (0부터 시작)", 0, 10, 0)
         s_header = st.number_input("가열로 데이터 제목행 (0부터 시작)", 0, 20, 0)
         
@@ -341,7 +355,6 @@ def main():
     if prod_file and sensor_files:
         st.subheader("🛠️ 데이터 컬럼 지정 (미리보기)")
         
-        # 컬럼 지정 로직을 run_btn과 분리하여 UI가 항상 업데이트되도록 합니다.
         try:
             # 미리보기 데이터 로드 (첫 3줄)
             df_p = smart_read_file(prod_file, p_header, 3)
@@ -352,19 +365,35 @@ def main():
             f.seek(0) # 파일 포인터 초기화
             
             c1, c2 = st.columns(2)
+            
             with c1:
                 st.caption("생산 실적 데이터")
                 st.dataframe(df_p)
-                col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=df_p.columns[0], key="p_date")
-                col_p_weight = st.selectbox("⚖️ 장입량 컬럼", df_p.columns, index=df_p.columns[1] if len(df_p.columns)>1 else df_p.columns[0], key="p_weight")
+                
+                # 키워드 기반 기본 인덱스 설정
+                col_p_date_index = get_default_index(df_p.columns, ['날짜', '일자', 'date'])
+                col_p_weight_index = get_default_index(df_p.columns, ['장입', '중량', 'weight'])
+                
+                # 사용자가 원하는 컬럼 이름 직접 선택
+                col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=col_p_date_index, key="p_date")
+                col_p_weight = st.selectbox("⚖️ 장입량 컬럼", df_p.columns, index=col_p_weight_index, key="p_weight")
+                
             with c2:
                 st.caption("가열로 센서 데이터")
                 st.dataframe(df_s)
-                col_s_time = st.selectbox("⏰ 일시 컬럼", df_s.columns, index=df_s.columns[0], key="s_time")
-                col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=df_s.columns[1] if len(df_s.columns)>1 else df_s.columns[0], key="s_temp")
-                col_s_gas = st.selectbox("⛽ 가스지침 컬럼", df_s.columns, index=df_s.columns[2] if len(df_s.columns)>2 else df_s.columns[0], key="s_gas")
-        except:
-            st.error("데이터 미리보기에 실패했습니다. 제목행 설정을 확인해주세요.")
+                
+                # 키워드 기반 기본 인덱스 설정
+                col_s_time_index = get_default_index(df_s.columns, ['일시', '시간', 'time'])
+                col_s_temp_index = get_default_index(df_s.columns, ['온도', 'temp'])
+                col_s_gas_index = get_default_index(df_s.columns, ['가스', '지침', 'gas'])
+                
+                # 사용자가 원하는 컬럼 이름 직접 선택
+                col_s_time = st.selectbox("⏰ 일시 컬럼", df_s.columns, index=col_s_time_index, key="s_time")
+                col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=col_s_temp_index, key="s_temp")
+                col_s_gas = st.selectbox("⛽ 가스지침 컬럼", df_s.columns, index=col_s_gas_index, key="s_gas")
+                
+        except Exception as e:
+            st.error(f"데이터 미리보기에 실패했습니다. 제목행 설정을 확인하거나 파일 형식을 점검해주세요. (세부 오류: {e})")
             col_p_date, col_p_weight, col_s_time, col_s_temp, col_s_gas = None, None, None, None, None
 
         if run_btn and col_p_date: # 컬럼 선택이 완료되었을 때 실행
